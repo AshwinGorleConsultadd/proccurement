@@ -107,10 +107,16 @@ def combine_masks_and_groups(
     # -----------------------------------
     # Final Output Structure
     # -----------------------------------
+    
+    # Strip mask_indices from groups before saving
+    cleaned_groups = {}
+    for g_id, g_data in groups_data.items():
+        cleaned_groups[g_id] = {k: v for k, v in g_data.items() if k != "mask_indices"}
+
     output = {
         "image_width": image_width,
         "image_height": image_height,
-        "groups": groups_data,
+        "groups": cleaned_groups,
         "masks": masks_output
     }
 

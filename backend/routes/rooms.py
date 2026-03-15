@@ -80,9 +80,31 @@ async def update_room_masks(room_id: str, body: MasksUpdate):
     if not os.path.exists(room_output_dir):
         os.makedirs(room_output_dir, exist_ok=True)
 
+    # Clean up frontend data to match masks_polygons.json structure
+    # Remove 'mask_indices' since we use the 'group_id' on the mask itself now
+    cleaned_groups = {}
+    for g_id, g_data in body.groups.items():
+        if "mask_indices" in g_data:
+            del g_data["mask_indices"]
+        cleaned_groups[g_id] = g_data
+
+    # Attempt to read existing width and height from the file if it exists
+    image_width = 0
+    image_height = 0
+    if os.path.exists(masks_polygons_json_path):
+        try:
+            with open(masks_polygons_json_path, 'r') as f:
+                existing_data = json.load(f)
+                image_width = existing_data.get("image_width", 0)
+                image_height = existing_data.get("image_height", 0)
+        except Exception:
+            pass
+
     data_to_save = {
-        "groups": body.groups,
-        "masks": body.masks
+        "groups": cleaned_groups,
+        "masks": body.masks,
+        "image_width": image_width,
+        "image_height": image_height
     }
 
     try:

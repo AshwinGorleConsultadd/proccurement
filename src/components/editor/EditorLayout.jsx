@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import editorData from "../../data/editor_data.json";
 import CanvasEditor from "./CanvasEditor";
@@ -55,26 +55,40 @@ export default function EditorLayout() {
 
         if (roomData.masks_polygons_url) {
           const masksRes = await fetch(
-            `http://localhost:8000${roomData.masks_polygons_url}`,
+            `http://localhost:8000${roomData.masks_polygons_url}?t=${Date.now()}`,
+            { cache: "no-store" },
           );
           if (masksRes.ok) {
             const data = await masksRes.json();
 
             const initializedGroups = {};
             for (const [key, group] of Object.entries(data.groups || {})) {
-              // Only override if not already in localStorage
               initializedGroups[key] = {
                 ...group,
                 type: group.type || "FF&E",
               };
             }
 
-            // Only update state if it's the initial load and no local storage exists
             const savedGroups = localStorage.getItem(`editor_groups_${roomId}`);
             const savedMasks = localStorage.getItem(`editor_masks_${roomId}`);
 
-            if (!savedGroups) setGroups(initializedGroups);
-            if (!savedMasks) setMasks(data.masks || []);
+            if (!savedGroups) {
+              setGroups(initializedGroups);
+            }
+            if (!savedMasks) {
+              setMasks(data.masks || []);
+            }
+
+            // Only re-init history if we loaded anything fresh
+            if (!savedGroups || !savedMasks) {
+              setHistory([
+                {
+                  masks: !savedMasks ? data.masks || [] : masks,
+                  groups: !savedGroups ? initializedGroups : groups,
+                },
+              ]);
+              setHistoryIndex(0);
+            }
           }
         }
       } catch (err) {
@@ -130,6 +144,24 @@ export default function EditorLayout() {
     setGroups(next.groups);
     setHistoryIndex(historyIndex + 1);
   };
+
+  const handlePersist = useCallback(async () => {
+    try {
+      setSaveStatus("Saving to backend...");
+      const res = await fetch(`http://localhost:8000/rooms/${roomId}/masks`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ masks, groups }),
+      });
+      if (!res.ok) throw new Error("Failed to persist");
+      setSaveStatus("Persisted to database");
+      setTimeout(() => setSaveStatus(null), 2000);
+    } catch (err) {
+      console.error(err);
+      setSaveStatus("Error saving to database");
+      setTimeout(() => setSaveStatus(null), 2500);
+    }
+  }, [roomId, masks, groups]);
 
   // ─── Keyboard shortcuts ───────────────────────────────────────────────────
   useEffect(() => {
@@ -190,7 +222,7 @@ export default function EditorLayout() {
         }
       }
 
-      // Cmd+S / Ctrl+S to save to local storage
+      // Cmd+S / Ctrl+S to save to local storage AND persist to backend
       if (ctrlKey && e.key === "s") {
         e.preventDefault();
         localStorage.setItem(
@@ -202,8 +234,8 @@ export default function EditorLayout() {
           JSON.stringify(masks),
         );
         console.log("State saved to local storage");
-        setSaveStatus("saved");
-        setTimeout(() => setSaveStatus(null), 2000);
+        // Also fire off the persist command to the backend
+        handlePersist();
       }
 
       if (
@@ -216,7 +248,15 @@ export default function EditorLayout() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [historyIndex, history, selectedMaskIds, groups, masks, clipboardMasks]);
+  }, [
+    historyIndex,
+    history,
+    selectedMaskIds,
+    groups,
+    masks,
+    clipboardMasks,
+    handlePersist,
+  ]);
 
   // ─── Selection helpers ────────────────────────────────────────────────────
   /**
@@ -388,24 +428,6 @@ export default function EditorLayout() {
   const handleSetEditorMode = (mode) => {
     setEditorMode(mode);
     if (mode !== "group") setChangeGroupMode(false);
-  };
-
-  const handlePersist = async () => {
-    try {
-      setSaveStatus("Saving to backend...");
-      const res = await fetch(`http://localhost:8000/rooms/${roomId}/masks`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ masks, groups }),
-      });
-      if (!res.ok) throw new Error("Failed to persist");
-      setSaveStatus("Persisted to database");
-      setTimeout(() => setSaveStatus(null), 2000);
-    } catch (err) {
-      console.error(err);
-      setSaveStatus("Error saving to database");
-      setTimeout(() => setSaveStatus(null), 2500);
-    }
   };
 
   return (
