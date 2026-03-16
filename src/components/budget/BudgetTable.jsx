@@ -55,7 +55,7 @@ import { exportToExcel, exportToPdf } from "./exportBudget";
 /**
  * BudgetTable — requires a projectId prop (MongoDB _id string of the project).
  */
-export function BudgetTable({ projectId: propProjectId }) {
+export function BudgetTable({ projectId: propProjectId, refreshKey }) {
   const dispatch = useDispatch();
   const {
     items,
@@ -95,6 +95,14 @@ export function BudgetTable({ projectId: propProjectId }) {
       fetchRooms();
     }
   }, [propProjectId, projectId, dispatch, fetchRooms]);
+
+  // Re-fetch items whenever the parent signals a refresh (e.g. after budget generation)
+  useEffect(() => {
+    if (refreshKey > 0) {
+      refetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   // Handlers
   const handleStartEdit = (id) => dispatch(setEditingRowId(id));

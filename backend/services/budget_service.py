@@ -5,13 +5,10 @@ Business logic for the MongoDB budget_items collection.
 from __future__ import annotations
 import re
 import uuid
-import os
-import json
 from datetime import datetime, timezone
 from typing import Optional
 from bson import ObjectId
 from db.mongo import get_db
-from db.database import BASE_DIR
 
 
 def _col():
@@ -68,6 +65,8 @@ async def list_items(
     filt: dict = {"project": project_id, "is_sub_item": {"$ne": True}}
     if search:
         filt["spec_no"] = {"$regex": search, "$options": "i"}
+
+    print("fe")
 
     if rooms_filter:
         # expects a comma-separated string of pure mongoid room IDs
@@ -261,7 +260,9 @@ async def create_item(project_id: str, data: dict) -> dict:
         "page_id":            data.get("page_id", ""),
         "room":               data.get("room", ""),
         "spec_no":            data.get("spec_no", ""),
+        "name":               data.get("name", ""),
         "description":        data.get("description", ""),
+        "group_id":           data.get("group_id", ""),
         "page_no":            data.get("page_no"),
         "qty":                data.get("qty", "1 Ea."),
         "unit_cost":          data.get("unit_cost"),
@@ -486,97 +487,195 @@ async def assign_to_parent(item_id: str, parent_id: str) -> bool:
     )
     return True
 
-async def generate_budget_from_rooms(project_id: str) -> dict:
-    from db.mongo import get_rooms_collection
-    from collections import defaultdict
-    rooms_coll = get_rooms_collection()
-    col = _col()
-    
-    rooms = await rooms_coll.find({"project": project_id}).to_list(None)
-    
-    new_items_count = 0
-    updated_items_count = 0
-    
+
+# ── Preliminary Budget Generation ───────────────────────────────────────────
+
+async def create_preliminary_budget(project_id: str) -> dict:
+    """
+    Reads masks_polygons.json for every room belonging to project_id,
+    then creates (or increments qty of) budget items in MongoDB.
+    """
+    import os, json
+    from db.mongo import get_rooms_collection, get_diagrams_collection, get_pages_collection
+
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_file_db = os.path.join(BASE_DIR, "local_file_db")
+
+    rooms_coll    = get_rooms_collection()
+    diagrams_coll = get_diagrams_collection()
+    pages_coll    = get_pages_collection()
+    col           = _col()
+
+    # 1. Fetch rooms — always query BOTH string and ObjectId formats.
+    #    Rooms created by the auto-analysis pipeline store project as ObjectId.
+    #    Rooms created manually via the API store project as a plain string.
+    #    We need both sets — but we only care about rooms that have masks_polygons_url.
+    print(f"[BudgetGen] Starting for project_id={project_id!r}")
+
+    rooms_str = await rooms_coll.find({"project": project_id}).to_list(None)
+    print(f"[BudgetGen] String query found {len(rooms_str)} room(s)")
+
+    rooms_oid = []
+    try:
+        rooms_oid = await rooms_coll.find({"project": ObjectId(project_id)}).to_list(None)
+        print(f"[BudgetGen] ObjectId query found {len(rooms_oid)} room(s)")
+    except Exception as e:
+        print(f"[BudgetGen] ObjectId conversion failed: {e}")
+
+    # Merge, deduplicate by _id
+    seen_ids = set()
+    rooms = []
+    for r in rooms_str + rooms_oid:
+        rid = str(r["_id"])
+        if rid not in seen_ids:
+            seen_ids.add(rid)
+            rooms.append(r)
+    print(f"[BudgetGen] Total unique rooms: {len(rooms)}")
+
+    if not rooms:
+        return {"created": 0, "updated": 0, "rooms_processed": 0,
+                "message": "No rooms found for this project."}
+
+    created_count = 0
+    updated_count = 0
+    rooms_processed = 0
+
+    # 2. Iterate over each room
     for room in rooms:
-        masks_polygons_url = room.get("masks_polygons_url")
-        if not masks_polygons_url:
+        room_id = str(room["_id"])
+        masks_url: str = room.get("masks_polygons_url", "")
+        print(f"[BudgetGen] Room {room_id}: masks_polygons_url={masks_url!r}")
+
+        if not masks_url:
+            print(f"[BudgetGen]  -> Skipping: no masks_polygons_url")
             continue
-            
-        # construct absolute path to JSON file
-        rel_path = masks_polygons_url.lstrip("/")
-        # We need to replace the local_file_db part if it maps directly into the backend directory
-        if rel_path.startswith("local_file_db/"):
-            file_path = os.path.join(BASE_DIR, rel_path)
-        else:
-            file_path = os.path.join(BASE_DIR, "local_file_db", rel_path)
-            
-        if not os.path.exists(file_path):
+
+        # Resolve URL to local filesystem path
+        # masks_url example: /local_file_db/project_.../rooms/.../analysis/masks_polygons.json
+        relative_path = masks_url.lstrip("/")
+        if relative_path.startswith("local_file_db/"):
+            relative_path = relative_path[len("local_file_db/"):]
+        json_path = os.path.join(local_file_db, relative_path)
+        print(f"[BudgetGen]  -> Resolved path: {json_path}")
+        print(f"[BudgetGen]  -> File exists: {os.path.exists(json_path)}")
+
+        if not os.path.exists(json_path):
+            print(f"[BudgetGen]  -> Skipping: file not found")
             continue
-            
-        with open(file_path, "r", encoding="utf-8") as f:
-            try:
+
+        try:
+            with open(json_path, "r") as f:
                 data = json.load(f)
-            except Exception:
+        except Exception as e:
+            print(f"[BudgetGen]  -> Skipping: JSON load error: {e}")
+            continue
+
+        groups: dict = data.get("groups", {})
+        masks: list  = data.get("masks", [])
+        print(f"[BudgetGen]  -> Loaded JSON: {len(groups)} groups, {len(masks)} masks")
+        rooms_processed += 1
+
+        # -- Resolve page_id and page_no for this room via the diagram chain --
+        # Chain: room.diagram (ObjectId) -> diagram.page (ObjectId) -> page.page_no (int)
+        room_name = room.get("room_name", "")
+        page_id_str  = ""
+        page_no_val  = None
+
+        diagram_ref = room.get("diagram")   # ObjectId or None
+        if diagram_ref:
+            try:
+                diag_doc = await diagrams_coll.find_one({"_id": diagram_ref})
+                if diag_doc and diag_doc.get("page"):
+                    page_doc = await pages_coll.find_one({"_id": diag_doc["page"]})
+                    if page_doc:
+                        page_id_str = str(page_doc["_id"])
+                        page_no_val = page_doc.get("page_no")
+            except Exception as e:
+                print(f"[BudgetGen]  -> Could not resolve page for room {room_id}: {e}")
+
+        print(f"[BudgetGen]  -> room_name={room_name!r}, page_id={page_id_str!r}, page_no={page_no_val!r}")
+
+        # 3. For each group, count masks and upsert budget item
+        for group_key, group in groups.items():
+            code: str = group.get("code", "").strip()
+            print(f"[BudgetGen]    Group {group_key}: code={code!r}")
+            if not code:
+                print(f"[BudgetGen]    -> Skipping: empty code")
                 continue
-                
-        groups = data.get("groups", {})
-        masks = data.get("masks", [])
-        
-        # Count masks per group_id
-        group_counts: dict[str, int] = {}
-        for mask in masks:
-            gid = mask.get("group_id")
-            if gid:
-                group_counts[gid] = group_counts.get(gid, 0) + 1
-                
-        for gid, count in group_counts.items():
-            if count == 0:
-                continue
-                
-            group_info = groups.get(gid)
-            if not group_info:
-                continue
-                
-            spec_no = group_info.get("code", "")
-            if not spec_no:
-                continue
-                
-            existing = await col.find_one({"project": project_id, "spec_no": spec_no})
-            
+
+            group_id_val: str = group.get("id", group_key)
+            group_name: str = group.get("name", "")
+            group_desc: str = group.get("description", "")
+
+            # Count masks belonging to this group
+            mask_count = sum(1 for m in masks if m.get("group_id") == group_id_val)
+            qty_number = max(mask_count, 1)
+            qty_str = f"{qty_number} Ea."
+            print(f"[BudgetGen]    -> mask_count={mask_count}, qty_str={qty_str!r}")
+
+            # Match on project + spec_no + group_id — the unique key for each group.
+            # When found, we OVERRIDE qty with the current JSON count (idempotent).
+            # This means repeated runs or mask removals are always reflected correctly.
+            existing = await col.find_one({
+                "project":  project_id,
+                "spec_no":  code,
+                "group_id": group_id_val,
+            })
+            print(f"[BudgetGen]    -> existing item in DB: {existing is not None}")
+
             if existing:
-                # Add to existing qty
-                existing_qty_str = str(existing.get("qty", "0"))
-                m = re.match(r"[\s]*([0-9]+(?:\.[0-9]*)?)", existing_qty_str)
-                existing_qty = int(float(m.group(1))) if m else 0
-                new_qty = existing_qty + count
-                
-                new_qty_str = f"{new_qty} Ea."
-                if m:
-                    suffix = existing_qty_str[m.end():]
-                    new_qty_str = f"{new_qty}{suffix}"
-                    
-                extended = _calc_extended(new_qty_str, existing.get("unit_cost"))
+                # OVERRIDE qty with current count from JSON (not increment)
+                new_extended = _calc_extended(qty_str, existing.get("unit_cost"))
                 await col.update_one(
                     {"_id": existing["_id"]},
-                    {"$set": {"qty": new_qty_str, "extended": extended, "updated_at": _now()}}
+                    {"$set": {
+                        "qty":         qty_str,
+                        "extended":    new_extended,
+                        "name":        group_name,
+                        "description": group_desc,
+                        "room":        room_name,
+                        "page_id":     page_id_str,
+                        "page_no":     page_no_val,
+                        "updated_at":  _now(),
+                    }},
                 )
-                updated_items_count += 1
+                updated_count += 1
+                print(f"[BudgetGen]    -> SYNCED qty to {qty_str!r}, room={room_name!r}, page_no={page_no_val!r}")
+
             else:
-                # Create a new budget item
-                name = group_info.get("name", "")
-                description = group_info.get("description", "")
-                qty_str = f"{count} Ea."
-                
-                await create_item(project_id, {
-                    "room": str(room["_id"]),
-                    "spec_no": spec_no,
-                    "description": description,
-                    "name": name,
-                    "qty": qty_str,
-                    "group_id": gid,
-                    "unit_cost": 0.0,
-                })
-                new_items_count += 1
+                new_index = await _max_order(project_id) + 1
+                now = _now()
+                new_doc = {
+                    "project":           project_id,
+                    "spec_no":           code,
+                    "name":              group_name,
+                    "description":       group_desc,
+                    "group_id":          group_id_val,
+                    "room":              room_name,       # human-readable room name
+                    "page_id":           page_id_str,     # MongoDB _id of the page
+                    "page_no":           page_no_val,     # page number (int)
+                    "qty":               qty_str,
+                    "unit_cost":         None,
+                    "extended":          None,
+                    "order_index":       new_index,
+                    "hidden_from_total": False,
+                    "is_sub_item":       False,
+                    "created_by":        "system",
+                    "subitems":          [],
+                    "created_at":        now,
+                    "updated_at":        now,
+                }
+                result = await col.insert_one(new_doc)
+                created_count += 1
+                print(f"[BudgetGen]    -> CREATED _id={result.inserted_id}, room={room_name!r}, page_no={page_no_val!r}")
 
-    return {"ok": True, "created": new_items_count, "updated": updated_items_count}
 
+    summary = (f"Budget generation complete. {created_count} items created, "
+               f"{updated_count} items updated across {rooms_processed} rooms.")
+    print(f"[BudgetGen] Done: {summary}")
+    return {
+        "created": created_count,
+        "updated": updated_count,
+        "rooms_processed": rooms_processed,
+        "message": summary,
+    }

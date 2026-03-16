@@ -42,6 +42,7 @@ import { RoomSeparatorTab } from "./RoomSeparatorTab";
 import { RoomProcessorTab } from "./RoomProcessorTab";
 import { SourceTab } from "./SourceTab";
 import { SummaryTab } from "./SummaryTab";
+import { BudgetPage } from "../budget/BudgetPage";
 
 const BASE = "http://localhost:8000";
 
@@ -412,7 +413,7 @@ export function ProjectEditorPage() {
             <RoomProcessorTab project={project} />
           ) : activeTab === "budget" ? (
             <div className="flex-1 overflow-y-auto p-6">
-              <BudgetTable projectId={project?._id ?? project?.id} />
+              <BudgetPage projectId={project?._id ?? project?.id} />
             </div>
           ) : (
             <SummaryTab project={project} />

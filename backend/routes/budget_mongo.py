@@ -12,6 +12,19 @@ import services.budget_service as svc
 router = APIRouter(prefix="/budget", tags=["Budget"])
 
 
+# ── Preliminary Budget Generation ─────────────────────────────────────────────
+
+@router.post("/create_budget/{project_id}", status_code=200)
+async def create_budget(project_id: str):
+    """
+    Generates preliminary budget items for the given project by reading
+    masks_polygons.json from every room associated with the project.
+    Items are created fresh or have their qty incremented if spec_no already exists.
+    """
+    result = await svc.create_preliminary_budget(project_id)
+    return result
+
+
 # ── Item list / export ────────────────────────────────────────────────────────
 
 @router.get("/{project_id}")
@@ -104,9 +117,4 @@ async def assign_to_parent(project_id: str, item_id: str, parent_id: str):
     if not ok:
         raise HTTPException(404, "Item or target parent not found")
     return {"ok": True}
-
-
-@router.post("/{project_id}/generate_from_masks")
-async def generate_from_masks(project_id: str):
-    return await svc.generate_budget_from_rooms(project_id)
 

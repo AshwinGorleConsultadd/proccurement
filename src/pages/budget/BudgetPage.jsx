@@ -1,31 +1,45 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { BudgetTable } from "../../components/budget/BudgetTable";
-import { Receipt, Loader2, PlayCircle } from "lucide-react";
+import {
+  Receipt,
+  Wand2,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+} from "lucide-react";
 import { Button } from "../../components/ui/button";
-import { useGetBudgetItems } from "../../redux/hooks/budget/useGetBudgetItems";
+import { api } from "../../redux/api/apiClient";
 
-export function BudgetPage() {
-  const { projectId } = useParams();
-  const { refetch } = useGetBudgetItems();
-  const [isGenerating, setIsGenerating] = useState(false);
+export function BudgetPage({ projectId: propProjectId }) {
+  // Support both: passed as prop (ProjectEditorPage) OR read from URL param (/projects/:id)
+  const params = useParams();
+  const projectId = propProjectId || params.id;
 
-  const handleGenerateBudget = async () => {
+  const [generating, setGenerating] = useState(false);
+  const [genResult, setGenResult] = useState(null); // { message, created, updated }
+  const [genError, setGenError] = useState(null);
+  // We'll use a refresh key to force BudgetTable to re-fetch after generation
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleCreateBudget = async () => {
     if (!projectId) return;
+    setGenerating(true);
+    setGenResult(null);
+    setGenError(null);
     try {
-      setIsGenerating(true);
-      const res = await fetch(
-        `http://localhost:8000/budget/${projectId}/generate_from_masks`,
-        {
-          method: "POST",
-        },
-      );
-      if (!res.ok) throw new Error("Failed to generate budget");
-      await refetch();
+      const res = await api.post(`/budget/create_budget/${projectId}`);
+      setGenResult(res.data);
+      // Trigger a refetch on BudgetTable
+      setRefreshKey((k) => k + 1);
     } catch (err) {
-      console.error("Error generating budget:", err);
+      const msg =
+        err?.response?.data?.detail ||
+        err?.message ||
+        "Budget generation failed.";
+      setGenError(msg);
     } finally {
-      setIsGenerating(false);
+      setGenerating(false);
     }
   };
 
@@ -45,22 +59,53 @@ export function BudgetPage() {
           </div>
         </div>
 
-        <Button
-          onClick={handleGenerateBudget}
-          disabled={isGenerating}
-          className="gap-2"
-        >
-          {isGenerating ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <PlayCircle className="h-4 w-4" />
-          )}
-          {isGenerating ? "Generating..." : "Create Budget"}
-        </Button>
+        {/* Create Budget Button */}
+        {projectId && (
+          <Button
+            onClick={handleCreateBudget}
+            disabled={generating}
+            className="gap-2 bg-violet-600 hover:bg-violet-700 text-white shadow-md"
+          >
+            {generating ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Generating Budget…
+              </>
+            ) : (
+              <>
+                <Wand2 className="h-4 w-4" />
+                Create Budget
+              </>
+            )}
+          </Button>
+        )}
       </div>
 
-      {/* Budget Table — always visible */}
-      <BudgetTable projectId={projectId} />
+      {/* Generation result / error banner */}
+      {genResult && (
+        <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm">
+          <CheckCircle className="h-4 w-4 text-emerald-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium text-emerald-700 dark:text-emerald-400">
+              {genResult.message}
+            </p>
+            <p className="text-emerald-600/80 dark:text-emerald-500/80 text-xs mt-0.5">
+              {genResult.created} new items created · {genResult.updated} items
+              updated · {genResult.rooms_processed} rooms processed
+            </p>
+          </div>
+        </div>
+      )}
+
+      {genError && (
+        <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm">
+          <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
+          <p className="text-destructive">{genError}</p>
+        </div>
+      )}
+
+      {/* Budget Table */}
+      <BudgetTable projectId={projectId} refreshKey={refreshKey} />
     </div>
   );
 }

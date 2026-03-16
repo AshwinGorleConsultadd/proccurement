@@ -71,12 +71,22 @@ def run_room_analysis_pipeline(room_id: str, project_id: str, room_image_url: st
         if img_bgr is None:
             raise ValueError(f"Could not read image using OpenCV: {input_image_path}")
             
-        # preprocess_floorplan_for_sam(
-        #     img_bgr=img_bgr,
-        #     save_output=True,
-        #     output_dir=room_output_dir,
-        #     output_name="preprocessed.png"
-        # )
+        preprocessed_img_path = os.path.join(room_output_dir, "preprocessed.png")
+
+        try:
+            preprocess_floorplan_for_sam(
+                img_bgr=img_bgr,
+                save_output=True,
+                output_dir=room_output_dir,
+                output_name="preprocessed.png"
+            )
+        except Exception as e:
+            print(f"[Orchestrator] Error during preprocessing: {e}")
+            raise
+            
+        if not os.path.exists(preprocessed_img_path):
+            raise ValueError(f"preprocess_floorplan_for_sam completed but file is missing at {preprocessed_img_path}")
+
 
         # 3. Generate Masks (SAM)
         update_room_analysis_status(room_id, "generating_masks", 30, "Generating segmentation masks using SAM Model (This may take a while)...")
