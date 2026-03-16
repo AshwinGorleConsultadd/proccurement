@@ -105,3 +105,8 @@ async def assign_to_parent(project_id: str, item_id: str, parent_id: str):
         raise HTTPException(404, "Item or target parent not found")
     return {"ok": True}
 
+
+@router.post("/{project_id}/generate_from_masks")
+async def generate_from_masks(project_id: str):
+    return await svc.generate_budget_from_rooms(project_id)
+

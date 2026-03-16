@@ -15,12 +15,14 @@ import uuid
 class BudgetItemCreate(BaseModel):
     spec_no:            str   = ""
     description:        str   = ""
+    name:               str   = ""          # Mapped from group name
     room:               str   = ""
     project:            str   = ""
     page_no:            Optional[int]   = None
     page_id:            str   = ""
     qty:                str   = "1 Ea."
     unit_cost:          Optional[float] = None
+    group_id:           str   = ""          # Linked from front-end mask groups
     # Ordering hint — insert above/below another item
     insert_relative_to: Optional[str]   = None   # _id string of neighbour
     position:           str   = "below"           # "above" | "below"
@@ -30,6 +32,8 @@ class BudgetItemCreate(BaseModel):
 class BudgetItemUpdate(BaseModel):
     spec_no:            Optional[str]   = None
     description:        Optional[str]   = None
+    name:               Optional[str]   = None
+    group_id:           Optional[str]   = None
     room:               Optional[str]   = None
     project:            Optional[str]   = None
     page_no:            Optional[int]   = None
@@ -47,6 +51,8 @@ class BudgetItemOut(BaseModel):
     room:               str   = ""  # Will be populated with room name or remain ID if unpopulated
     spec_no:            str   = ""
     description:        str   = ""
+    name:               str   = ""
+    group_id:           str   = ""
     page_no:            Optional[int]   = None
     qty:                str   = ""
     unit_cost:          Optional[float] = None

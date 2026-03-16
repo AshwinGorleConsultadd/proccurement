@@ -5,10 +5,13 @@ Business logic for the MongoDB budget_items collection.
 from __future__ import annotations
 import re
 import uuid
+import os
+import json
 from datetime import datetime, timezone
 from typing import Optional
 from bson import ObjectId
 from db.mongo import get_db
+from db.database import BASE_DIR
 
 
 def _col():
@@ -482,4 +485,98 @@ async def assign_to_parent(item_id: str, parent_id: str) -> bool:
         {"$set": {"is_sub_item": True, "updated_at": _now()}}
     )
     return True
+
+async def generate_budget_from_rooms(project_id: str) -> dict:
+    from db.mongo import get_rooms_collection
+    from collections import defaultdict
+    rooms_coll = get_rooms_collection()
+    col = _col()
+    
+    rooms = await rooms_coll.find({"project": project_id}).to_list(None)
+    
+    new_items_count = 0
+    updated_items_count = 0
+    
+    for room in rooms:
+        masks_polygons_url = room.get("masks_polygons_url")
+        if not masks_polygons_url:
+            continue
+            
+        # construct absolute path to JSON file
+        rel_path = masks_polygons_url.lstrip("/")
+        # We need to replace the local_file_db part if it maps directly into the backend directory
+        if rel_path.startswith("local_file_db/"):
+            file_path = os.path.join(BASE_DIR, rel_path)
+        else:
+            file_path = os.path.join(BASE_DIR, "local_file_db", rel_path)
+            
+        if not os.path.exists(file_path):
+            continue
+            
+        with open(file_path, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+            except Exception:
+                continue
+                
+        groups = data.get("groups", {})
+        masks = data.get("masks", [])
+        
+        # Count masks per group_id
+        group_counts: dict[str, int] = {}
+        for mask in masks:
+            gid = mask.get("group_id")
+            if gid:
+                group_counts[gid] = group_counts.get(gid, 0) + 1
+                
+        for gid, count in group_counts.items():
+            if count == 0:
+                continue
+                
+            group_info = groups.get(gid)
+            if not group_info:
+                continue
+                
+            spec_no = group_info.get("code", "")
+            if not spec_no:
+                continue
+                
+            existing = await col.find_one({"project": project_id, "spec_no": spec_no})
+            
+            if existing:
+                # Add to existing qty
+                existing_qty_str = str(existing.get("qty", "0"))
+                m = re.match(r"[\s]*([0-9]+(?:\.[0-9]*)?)", existing_qty_str)
+                existing_qty = int(float(m.group(1))) if m else 0
+                new_qty = existing_qty + count
+                
+                new_qty_str = f"{new_qty} Ea."
+                if m:
+                    suffix = existing_qty_str[m.end():]
+                    new_qty_str = f"{new_qty}{suffix}"
+                    
+                extended = _calc_extended(new_qty_str, existing.get("unit_cost"))
+                await col.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {"qty": new_qty_str, "extended": extended, "updated_at": _now()}}
+                )
+                updated_items_count += 1
+            else:
+                # Create a new budget item
+                name = group_info.get("name", "")
+                description = group_info.get("description", "")
+                qty_str = f"{count} Ea."
+                
+                await create_item(project_id, {
+                    "room": str(room["_id"]),
+                    "spec_no": spec_no,
+                    "description": description,
+                    "name": name,
+                    "qty": qty_str,
+                    "group_id": gid,
+                    "unit_cost": 0.0,
+                })
+                new_items_count += 1
+
+    return {"ok": True, "created": new_items_count, "updated": updated_items_count}
 
