@@ -337,7 +337,7 @@ export function RoomProcessorTab({ project }) {
           console.error("Poll error for", roomId, e);
         }
       }
-    }, 2500); // Check every 2.5 seconds
+    }, 15000); // Check every 10 seconds
 
     return () => clearInterval(interval);
   }, [pollingRooms, project._id, project.id, loadOne]);

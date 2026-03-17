@@ -58,7 +58,6 @@ setuptools==82.0.0
 shellingham==1.5.4
 simsimd==6.5.13
 six==1.17.0
-SQLAlchemy==2.0.46
 starlette==0.52.1
 stringzilla==4.6.0
 sympy==1.14.0

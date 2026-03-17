@@ -4,7 +4,7 @@ FastAPI router — MongoDB-backed budget items.
 All routes are scoped under /budget/{project_id}.
 """
 from fastapi import APIRouter, HTTPException, Query
-from schemas.budget_mongo import (
+from schemas.budget import (
     BudgetItemCreate, BudgetItemUpdate, BudgetItemOut
 )
 import services.budget_service as svc
