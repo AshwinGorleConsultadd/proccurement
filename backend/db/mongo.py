@@ -34,3 +34,9 @@ def get_diagrams_collection():
 
 def get_rooms_collection():
     return get_db()["rooms"]
+
+def get_pdf_documents_collection():
+    return get_db()["pdf_documents"]
+
+def get_processing_jobs_collection():
+    return get_db()["processing_jobs"]

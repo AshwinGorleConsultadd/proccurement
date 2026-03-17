@@ -525,7 +525,14 @@ async def create_preliminary_budget(project_id: str) -> dict:
     # Merge, deduplicate by _id
     seen_ids = set()
     rooms = []
-    for r in rooms_str + rooms_oid:
+    
+    for r in rooms_str:
+        rid = str(r["_id"])
+        if rid not in seen_ids:
+            seen_ids.add(rid)
+            rooms.append(r)
+            
+    for r in rooms_oid:
         rid = str(r["_id"])
         if rid not in seen_ids:
             seen_ids.add(rid)

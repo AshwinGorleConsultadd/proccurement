@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pickle
 import os
-from db.database import BASE_DIR
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class MaskGenerator:
     def __init__(self, checkpoint_path=None, model_type="vit_h"):

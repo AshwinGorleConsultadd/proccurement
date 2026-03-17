@@ -2,14 +2,11 @@ import os
 import json
 import shutil
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Form, BackgroundTasks
-from sqlalchemy.orm import Session
-from db.database import get_db, BASE_DIR
-from models.sql_models import ProcessingJob, PdfDocument
+from fastapi import APIRouter, HTTPException, Form, BackgroundTasks
 from schemas.budget import JobOut
 from services.pdf_processing import run_processing, LOCAL_FILE_DB, get_yolo_status
 from routes.pdf import UPLOAD_DIR
-from db.mongo import get_diagrams_collection, get_pages_collection
+from db.mongo import get_diagrams_collection, get_pages_collection, get_pdf_documents_collection, get_processing_jobs_collection
 from bson import ObjectId
 
 router = APIRouter(prefix="/floorplan", tags=["Floorplan"])
@@ -17,20 +14,20 @@ router = APIRouter(prefix="/floorplan", tags=["Floorplan"])
 @router.post("/process")
 async def start_processing(
     background_tasks: BackgroundTasks,
-    pdf_id:       int   = Form(...),
+    pdf_id:       str   = Form(...),
     dpi:          int   = Form(300),
-    min_area_pct: float = Form(5.0),
-    db: Session = Depends(get_db)
+    min_area_pct: float = Form(5.0)
 ):
     dpi = 300
-    pdf_doc = db.query(PdfDocument).filter(PdfDocument.id == pdf_id).first()
+    pdf_docs_coll = get_pdf_documents_collection()
+    pdf_doc = await pdf_docs_coll.find_one({"_id": ObjectId(pdf_id)})
     if not pdf_doc:
         raise HTTPException(404, "PDF not found")
-    pdf_path = os.path.join(UPLOAD_DIR, pdf_doc.filename)
+    pdf_path = os.path.join(UPLOAD_DIR, pdf_doc.get("filename", ""))
     if not os.path.exists(pdf_path):
         raise HTTPException(404, "PDF file missing on disk")
 
-    project_id = pdf_doc.project_id
+    project_id = pdf_doc.get("project_id")
     if not project_id:
         raise HTTPException(400, "PDF is not associated with a MongoDB project")
 
@@ -38,40 +35,52 @@ async def start_processing(
     job_dir = os.path.join(LOCAL_FILE_DB, f"project_{project_id}", "pdf_processing")
     os.makedirs(job_dir, exist_ok=True)
 
-    job = ProcessingJob(
-        pdf_id=pdf_id, project_id=project_id, status="pending", step="Queued — waiting to start",
-        progress=0, job_dir=job_dir, dpi=dpi,
-        min_area_pct=min_area_pct, created_at=datetime.now().isoformat(),
-    )
-    db.add(job); db.commit(); db.refresh(job)
-    job_id = job.id
+    jobs_coll = get_processing_jobs_collection()
+    job_data = {
+        "pdf_id": pdf_id, 
+        "project_id": project_id, 
+        "status": "pending", 
+        "step": "Queued — waiting to start",
+        "progress": 0, 
+        "job_dir": job_dir, 
+        "dpi": dpi,
+        "min_area_pct": min_area_pct, 
+        "created_at": datetime.now().isoformat()
+    }
+    result = await jobs_coll.insert_one(job_data)
+    job_id = str(result.inserted_id)
+    job_data["id"] = job_id
+    
     background_tasks.add_task(run_processing, job_id, pdf_path, dpi, min_area_pct)
-    return JobOut.model_validate(job)
+    return JobOut.model_validate(job_data)
 
 @router.get("/job/{job_id}")
-def get_job_status(job_id: int, db: Session = Depends(get_db)):
-    job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
+async def get_job_status(job_id: str):
+    jobs_coll = get_processing_jobs_collection()
+    job = await jobs_coll.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(404, "Job not found")
+    job["id"] = str(job.pop("_id"))
     return JobOut.model_validate(job)
 
 @router.get("/job/{job_id}/images")
-async def get_job_images(job_id: int, db: Session = Depends(get_db)):
-    job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
+async def get_job_images(job_id: str):
+    jobs_coll = get_processing_jobs_collection()
+    job = await jobs_coll.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.status != "done":
-        return {"images": [], "total": 0, "status": job.status}
-    if not job.project_id:
+    if job.get("status") != "done":
+        return {"images": [], "total": 0, "status": job.get("status")}
+    if not job.get("project_id"):
         return {"images": [], "total": 0, "status": "done"}
 
     pages_coll = get_pages_collection()
     diagrams_coll = get_diagrams_collection()
 
-    pages = await pages_coll.find({"project": ObjectId(job.project_id)}).to_list(length=None)
+    pages = await pages_coll.find({"project": ObjectId(job.get("project_id"))}).to_list(length=None)
     page_map = {p["_id"]: p["page_no"] for p in pages}
 
-    diagrams = await diagrams_coll.find({"project": ObjectId(job.project_id)}).to_list(length=None)
+    diagrams = await diagrams_coll.find({"project": ObjectId(job.get("project_id"))}).to_list(length=None)
     
     images = []
     for d in diagrams:
@@ -89,29 +98,30 @@ async def get_job_images(job_id: int, db: Session = Depends(get_db)):
     return {"images": images, "total": len(images), "status": "done"}
 
 @router.post("/job/{job_id}/save-selected")
-async def save_selected_images(job_id: int, body: dict, db: Session = Depends(get_db)):
-    job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
+async def save_selected_images(job_id: str, body: dict):
+    jobs_coll = get_processing_jobs_collection()
+    job = await jobs_coll.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.status != "done":
+    if job.get("status") != "done":
         raise HTTPException(400, "Job not complete yet")
 
     selected_names = set(body.get("selected", []))
-    selected_dir   = os.path.join(job.job_dir, "sectioned", "selected")
+    selected_dir   = os.path.join(job.get("job_dir", ""), "sectioned", "selected")
     os.makedirs(selected_dir, exist_ok=True)
 
     diagrams_coll = get_diagrams_collection()
     pages_coll = get_pages_collection()
 
-    diagrams = await diagrams_coll.find({"project": ObjectId(job.project_id)}).to_list(length=None)
-    pages = await pages_coll.find({"project": ObjectId(job.project_id)}).to_list(length=None)
+    diagrams = await diagrams_coll.find({"project": ObjectId(job.get("project_id"))}).to_list(length=None)
+    pages = await pages_coll.find({"project": ObjectId(job.get("project_id"))}).to_list(length=None)
     page_map = {p["_id"]: p["page_no"] for p in pages}
 
     # Reset all to not selected first
-    await diagrams_coll.update_many({"project": ObjectId(job.project_id)}, {"$set": {"is_selected": False}})
+    await diagrams_coll.update_many({"project": ObjectId(job.get("project_id"))}, {"$set": {"is_selected": False}})
     
     result_images = []
-    rel_base = job.job_dir.replace(LOCAL_FILE_DB, "").lstrip("/\\").replace("\\", "/")
+    rel_base = job.get("job_dir", "").replace(LOCAL_FILE_DB, "").lstrip("/\\").replace("\\", "/")
     
     for d in diagrams:
         if str(d["_id"]) in selected_names:
@@ -139,10 +149,10 @@ async def save_selected_images(job_id: int, body: dict, db: Session = Depends(ge
             })
 
     metadata = {
-        "project_id":     job.project_id,
+        "project_id":     job.get("project_id"),
         "total_selected": len(result_images),
         "timestamp":      datetime.now().isoformat(),
-        "dpi":            job.dpi,
+        "dpi":            job.get("dpi"),
         "images":         result_images,
     }
     meta_path = os.path.join(selected_dir, "selected_images_metadata.json")
@@ -152,10 +162,16 @@ async def save_selected_images(job_id: int, body: dict, db: Session = Depends(ge
     return metadata
 
 @router.get("/jobs")
-def list_jobs(db: Session = Depends(get_db)):
-    jobs = db.query(ProcessingJob).order_by(ProcessingJob.id.desc()).all()
-    return [JobOut.model_validate(j) for j in jobs]
+async def list_jobs():
+    jobs_coll = get_processing_jobs_collection()
+    jobs = await jobs_coll.find().sort({"_id": -1}).to_list(length=None)
+    result = []
+    for j in jobs:
+        j["id"] = str(j.pop("_id"))
+        result.append(JobOut.model_validate(j))
+    return result
 
 @router.get("/yolo-status")
 def get_yolo_status_route():
     return get_yolo_status()
+

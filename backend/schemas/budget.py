@@ -37,8 +37,9 @@ class BudgetItemOut(BaseModel):
     class Config:
         from_attributes = True
 
+
 class PdfDocumentOut(BaseModel):
-    id:           int
+    id:           str
     filename:     str
     original_name:str
     file_path:    str
@@ -47,12 +48,10 @@ class PdfDocumentOut(BaseModel):
     page_count:   Optional[int] = None
     uploaded_at:  str
     project_id:   Optional[str] = None
-    class Config:
-        from_attributes = True
 
 class JobOut(BaseModel):
-    id:          int
-    pdf_id:      int
+    id:          str
+    pdf_id:      str
     status:      str
     step:        str
     progress:    int
@@ -62,8 +61,7 @@ class JobOut(BaseModel):
     dpi:         int
     min_area_pct:float
     project_id:  Optional[str] = None
-    class Config:
-        from_attributes = True
+
 
 class ProjectSqlCreate(BaseModel):
     name:          str = "Unnamed Project"

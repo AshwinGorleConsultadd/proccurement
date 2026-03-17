@@ -2,13 +2,20 @@
 
 # Ensure virtual environment exists
 if [ ! -d "venv" ]; then
-    echo "Virtual environment (venv) not found. Running setup first..."
-    sh setup_env.sh
+    echo "Virtual environment (venv) not found. Creating it..."
+    PY_CMD="python3"
+    if ! command -v python3 &> /dev/null; then
+        PY_CMD="python"
+    fi
+    $PY_CMD -m venv venv
     if [ ! -f "venv/bin/python" ]; then
         echo "Failed to create virtual environment. Aborting."
         exit 1
     fi
+    echo "Installing backend dependencies..."
+    ./venv/bin/pip install -r backend/requirements.txt
 fi
+
 
 # Function to kill background processes on exit
 cleanup() {

@@ -1,14 +1,12 @@
 import os, json, shutil
 from datetime import datetime
-from sqlalchemy.orm import Session
-from models.sql_models import ProcessingJob
-from db.database import SessionLocal, BASE_DIR
 import fitz
 import cv2
 from pymongo import MongoClient
 from bson import ObjectId
 from config import MONGO_URI, MONGO_DB_NAME
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_FILE_DB = os.path.join(BASE_DIR, "local_file_db")
 os.makedirs(LOCAL_FILE_DB, exist_ok=True)
 
@@ -40,10 +38,8 @@ def get_yolo_status():
         "classes":      list(_yolo_model.names.values()) if _yolo_model else [],
     }
 
-def _update_job(db: Session, job: ProcessingJob, **kwargs):
-    for k, v in kwargs.items():
-        setattr(job, k, v)
-    db.commit()
+def _update_job(jobs_coll, job_id: str, **kwargs):
+    jobs_coll.update_one({"_id": ObjectId(job_id)}, {"$set": kwargs})
 
 def _yolo_crop_page(img_path: str, out_path: str) -> bool:
     if _yolo_model is None:
@@ -228,13 +224,16 @@ def _sync_update_mongodb_project(project_id: str, registry_url: str, page_paths:
     except Exception as e:
         print(f"[MongoDB] ❌ sync update failed: {e}")
 
-def run_processing(job_id: int, pdf_path: str, dpi: int, min_area_pct: float):
-    db  = SessionLocal()
-    job = db.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
-    if not job:
-        db.close(); return
+def run_processing(job_id: str, pdf_path: str, dpi: int, min_area_pct: float):
+    client = MongoClient(MONGO_URI)
+    db = client[MONGO_DB_NAME]
+    jobs_coll = db["processing_jobs"]
     
-    job_dir       = job.job_dir
+    job = jobs_coll.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        client.close(); return
+    
+    job_dir       = job.get("job_dir", "")
     temp_dir      = os.path.join(job_dir, "temp")
     crops_dir     = os.path.join(job_dir, "sectioned")
     sectioned_dir = os.path.join(job_dir, "sectioned")
@@ -242,7 +241,7 @@ def run_processing(job_id: int, pdf_path: str, dpi: int, min_area_pct: float):
     os.makedirs(crops_dir,     exist_ok=True)
 
     try:
-        _update_job(db, job, status="processing", step="Step 1/3 — Converting PDF to images (300 DPI)", progress=5)
+        _update_job(jobs_coll, job_id, status="processing", step="Step 1/3 — Converting PDF to images (300 DPI)", progress=5)
         pdf_doc     = fitz.open(pdf_path)
         total_pages = pdf_doc.page_count
         zoom        = dpi / 72
@@ -254,15 +253,15 @@ def run_processing(job_id: int, pdf_path: str, dpi: int, min_area_pct: float):
             pix.save(name)
             page_paths.append(name)
             prog = 5 + int(25 * (i + 1) / total_pages)
-            _update_job(db, job, progress=prog)
+            _update_job(jobs_coll, job_id, progress=prog)
         pdf_doc.close()
 
         yolo_available = _yolo_model is not None
         if yolo_available:
-            _update_job(db, job, step="Step 2/3 — Extracting main areas with DocLayout-YOLO", progress=30)
+            _update_job(jobs_coll, job_id, step="Step 2/3 — Extracting main areas with DocLayout-YOLO", progress=30)
         else:
             warn = _yolo_load_error or "doclayout_yolo not available"
-            _update_job(db, job, step=f"Step 2/3 — YOLO unavailable ({warn}), using full pages", progress=30)
+            _update_job(jobs_coll, job_id, step=f"Step 2/3 — YOLO unavailable ({warn}), using full pages", progress=30)
 
         crop_paths = []
         for idx, img_path in enumerate(page_paths):
@@ -271,9 +270,9 @@ def run_processing(job_id: int, pdf_path: str, dpi: int, min_area_pct: float):
                 shutil.copy(img_path, out_path)
             crop_paths.append(out_path)
             prog = 30 + int(30 * (idx + 1) / len(page_paths))
-            _update_job(db, job, progress=prog)
+            _update_job(jobs_coll, job_id, progress=prog)
 
-        _update_job(db, job, step="Step 3/3 — Detecting and splitting multiple diagrams", progress=62)
+        _update_job(jobs_coll, job_id, step="Step 3/3 — Detecting and splitting multiple diagrams", progress=62)
         min_area_ratio = min_area_pct / 100.0
         all_images     = []
 
@@ -306,19 +305,20 @@ def run_processing(job_id: int, pdf_path: str, dpi: int, min_area_pct: float):
                         "sub_index":   si,
                     })
             prog = 62 + int(35 * (idx + 1) / len(crop_paths))
-            _update_job(db, job, progress=prog)
+            _update_job(jobs_coll, job_id, progress=prog)
 
         sectioned_registry_path = os.path.join(job_dir, "sectioned_diagram_registry.json")
         with open(sectioned_registry_path, "w") as f:
             json.dump({"images": all_images, "total": len(all_images)}, f, indent=2)
 
         # Update MongoDB project document (Sync call in threadpool)
-        if job.project_id:
-            registry_url = f"/local_file_db/project_{job.project_id}/pdf_processing/sectioned_diagram_registry.json"
-            _sync_update_mongodb_project(job.project_id, registry_url, page_paths, all_images)
+        if job.get("project_id"):
+            registry_url = f"/local_file_db/project_{job.get('project_id')}/pdf_processing/sectioned_diagram_registry.json"
+            _sync_update_mongodb_project(job.get("project_id"), registry_url, page_paths, all_images)
 
-        _update_job(db, job, status="done", step="Complete — all steps finished", progress=100)
+        _update_job(jobs_coll, job_id, status="done", step="Complete — all steps finished", progress=100)
     except Exception as e:
-        _update_job(db, job, status="error", error_msg=str(e), progress=0, step=f"Error: {str(e)}")
+        _update_job(jobs_coll, job_id, status="error", error_msg=str(e), progress=0, step=f"Error: {str(e)}")
     finally:
-        db.close()
+        client.close()
+
